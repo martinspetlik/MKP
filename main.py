@@ -1,17 +1,14 @@
 import numpy as np
-import scipy.integrate as integrate
 import matplotlib.pyplot as plt
+import scipy.sparse
+import scipy.sparse.linalg
+from scipy.interpolate import lagrange
 import pandas as pd
+from basis_functions import Linear, Quadratic
 
-GAUSS_DEGREE = 10#@TODO: How to properly determine gauss degree
 
+GAUSS_DEGREE = 10  # @TODO: How to properly determine gauss degree
 
-# def reference_basis_fce(x, x_s, x_r, d=1):
-#     value = 1
-#     for i in range(d):
-#         value *= (x-x_s)/ (x_s - x_r)
-#
-#     return value
 
 def exact_solution_a(x, Q=1):
     return 1 - np.exp(Q*x)
@@ -24,8 +21,6 @@ def conductivity_a(x, Q=1):
 def exact_solution_b(x, Q=1, L=1):
     if isinstance(x, (list,np.ndarray)):
         res = np.zeros(len(x))
-        print("x shape ", x.shape)
-        print("res shape ", res.shape)
         res[x <= -L/3] = -Q*(1000*x[x <= -L/3] + 333*L)
         res[x >= -L/3] = -Q * x[x >= -L/3]
         return res
@@ -48,204 +43,96 @@ def conductivity_b(x, Q=1, L=1):
         if x >= -L/3:
             return 1
 
-# def conductivity_1_der(x, Q=1):
-#     return -Q*np.exp(-Q*x)
 
+def FEM(N, conductivity=conductivity_a, exact_solution=exact_solution_a, L=1, Q=1, quadratic=False):
+    """
+    :param N: number of elements
+    :param conductivity: function to get hydraulic conductivity
+    :param exact_solution: exact solution function
+    :param L: lower boundary
+    :param Q: Neumann boundary condition
+    :param quadratic: bool, if True use quadratic basis functions else linear
+    :return: nodes, mesh step, solution in nodes
+    """
+    h = (0-(-L)) / N  # mesh step
+    N_nodes = N+1  # number of nodes
+    nodes = np.linspace(-L, 0, N_nodes, endpoint=True)
+    # Basic tests
+    assert N_nodes == len(nodes)
+    assert np.isclose(nodes[1] - nodes[0], h)
 
-class BasisFunctions:
-    @staticmethod
-    def points_from_ref_to_ele(x1, h, x):
-        """
-        :param x1: element starting point
-        :param h: length of element
-        :param x: reference element point(s)
-        :return: element points
-        """
-        return x1 + h * x
-
-    @staticmethod
-    def points_from_ele_to_ref(x1, h, x):
-        """
-        :param x1: element starting point
-        :param h: length of element
-        :param x: reference element point(s)
-        :return: element points
-        """
-        return (x - x1) / h
-
-
-class Linear(BasisFunctions):
-    @staticmethod
-    def phi_ref_1(x):
-        return 1-x
-
-    @staticmethod
-    def phi_ref_2(x):
-        return x
-
-    @staticmethod
-    def phi_ref_1_der(x=None, h=1):
-        #print("phi 1 der h ", h)
-        return (-1/h)
-
-    @staticmethod
-    def phi_ref_2_der(x=None, h=1):
-        return (1/h)
-
-    @staticmethod
-    def get_functions_der():
-        return [Linear.phi_ref_1_der, Linear.phi_ref_2_der]
-
-    @staticmethod
-    def get_functions():
-        return [Linear.phi_ref_1, Linear.phi_ref_2]
-
-
-class Quadratic(BasisFunctions):
-    @staticmethod
-    def phi_ref_1(x):
-        return 2*(x**2) - 3*x +1
-
-    @staticmethod
-    def phi_ref_2(x):
-        return -4*(x**2) + 4*x
-
-    @staticmethod
-    def phi_ref_3(x):
-        return 2 * (x ** 2) - x
-
-    @staticmethod
-    def phi_ref_1_der(x=None, h=1):
-        return (4*x-3)*(1/h)
-
-    @staticmethod
-    def phi_ref_2_der(x=None, h=1):
-        return (-8 * x + 4) * (1/h)
-
-    @staticmethod
-    def phi_ref_3_der(x=None, h=1):
-        return (4*x-1)*(1/h)
-
-    @staticmethod
-    def get_functions_der():
-        return [Quadratic.phi_ref_1_der, Quadratic.phi_ref_2_der, Quadratic.phi_ref_3_der]
-
-    @staticmethod
-    def get_functions():
-        return [Quadratic.phi_ref_1, Quadratic.phi_ref_2, Quadratic.phi_ref_3]
-
-def FEM(N, quadratic=False):
-    #quadratic = True
-    exact_solution = exact_solution_b
-    conductivity = conductivity_b
-    L = 1
-    Q = 1
-    N_nodes = N+1
-    h = (0-(-L)) / (N_nodes)
-    print("h ", h)
-    x_ele = np.linspace(-L, 0, N_nodes, endpoint=True)
     basis_func = Linear
     if quadratic:
         basis_func = Quadratic
+    basis_func_der = basis_func.get_functions_der()
 
-    print("x_ele ", x_ele)
+    # Generate quadrature on reference element
     ref_ele = [0, 1]
     pt, w = np.polynomial.legendre.leggauss(GAUSS_DEGREE)
-
-    pt = (pt + 1) / 2 * (ref_ele[1] - ref_ele[0]) + ref_ele[0]
-    w = w * (ref_ele[1] - ref_ele[0]) / 2
-
-    print("pt ", pt)
-    print("w ", w)
-
-    print("N ", N)
-    #exit()
+    quad_pt = (pt + 1) / 2 * (ref_ele[1] - ref_ele[0]) + ref_ele[0]
+    quad_w = w * (ref_ele[1] - ref_ele[0]) / 2
 
     if quadratic:
         N_nodes = N_nodes + N_nodes-1
-    print("N ", N)
-    A = np.zeros((N_nodes, N_nodes))
+
+    A = scipy.sparse.csr_matrix((N_nodes, N_nodes))#np.zeros((N_nodes, N_nodes))
     b = np.zeros(N_nodes-1)
 
-    functions = basis_func.get_functions_der()
-
-    print("x ele ", x_ele)
-    z =0
-    for k, x_k in enumerate(x_ele[:-1]):
-        #k = k
+    for k, node in enumerate(nodes[:-1]):
         if quadratic:
-            z = 2*k
+            A_i = k*2
         else:
-            z = k
-        print("K index ", k)
-        #print("x_k ", x_k)
-        # the particular element is range [x_k, x_{k+1}]
-        #ele_ref_x = Linear.points_from_ref_to_ele(x_k, h, pt)
-        #print("ele ref x ", ele_ref_x)
+            A_i = k
 
-        M = np.zeros((len(functions), len(functions)))
-        for i in range(len(functions)):
-            for j in range(i, len(functions)):
-                for quad_pt, quad_w in zip(pt, w):
-                    x_c = basis_func.points_from_ref_to_ele(x_k, h, quad_pt)
-                    #print("x_k:{}, x_c:{}, quad_pt: {}".format(x_k, x_c, quad_pt))
+        M = np.zeros((len(basis_func_der), len(basis_func_der), len(quad_pt)))
+        for i in range(len(basis_func_der)):
+            for j in range(i, len(basis_func_der)):
+                x_c = basis_func.points_from_ref_to_ele(node, h, quad_pt)
+                # Last node should be zero, corresponding basis function is not used
+                if k == len(nodes) - 2:
+                    if i != len(basis_func_der)-1 and j != len(basis_func_der)-1:
+                        M[i, j, :] += quad_w * conductivity(x_c, Q) * basis_func_der[i](quad_pt, h) * basis_func_der[j](quad_pt, h) * h
+                else:
+                    M[i, j, :] += quad_w * conductivity(x_c, Q) * basis_func_der[i](quad_pt, h) * basis_func_der[j](quad_pt, h) * h
+                M[j, i, :] = M[i, j, :]
 
-                    if k == len(x_ele) - 2:
-                        #print("LAST k: {}".format(k))
-                        #if i == 1 or j == 1:
-                        if i == len(functions)-1 or j == len(functions)-1:
-                            print("i: {}, j: {}".format(i, j))
-                            M[i,j] += 0
-                        else:
-                            M[i, j] += quad_w * conductivity(x_c, Q) * functions[i](quad_pt, h) * functions[j](quad_pt, h) * h
-                    else:
-                        M[i, j] += quad_w * conductivity(x_c, Q) * functions[i](quad_pt, h) * functions[j](quad_pt, h) * h
-                        M[j, i] = M[i,j]
-
-        k_index = z
-        A[k_index:(k_index+len(functions)), k_index:(k_index+len(functions))] += M
+        A[A_i:(A_i+len(basis_func_der)), A_i:(A_i+len(basis_func_der))] += np.sum(M, axis=-1)
 
     b[0] = Q
-    if quadratic:
-        A = A[:-1, :-1]
-        b = b#[:-1]
-    else:
-        A = A[:-1, :-1]
+    A = A[:-1, :-1]  # Basis function at last node point are zero
 
-    with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-        print("A ")
-        print(pd.DataFrame(A))
+    # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    #     print("A ")
+    #     print(pd.DataFrame(A))
 
-    # print("A[k:k+1, k:k+1] ", A[k:k + 1, k:k + 1])
-    # print("b ", b)
-    # print("A ", A)
+    p_h = scipy.sparse.linalg.spsolve(A.toarray(), b)  # Solve sparse linear system
+    p_h = list(p_h)
+    p_h.append(0)
 
-    p_coefs = np.linalg.solve(A, b)
-    print("p ", p_coefs)
+    plot_res(basis_func, nodes, h, p_h, exact_solution, quadratic, L)
+    return nodes, h, p_h
 
 
+def plot_res(basis_func, nodes, h, p_h, exact_solution, quadratic=False, L=1):
     x = np.linspace(-L, 0, 250)
-    functions = basis_func.get_functions()
+    basis_func_der = basis_func.get_functions()
     resolution_per_ele = 10
     ele_x_values = []
     ele_y_values = []
 
-    for k, x_k in enumerate(x_ele[:-1]):
+    for k, node in enumerate(nodes[:-1]):
         if quadratic:
-            k = k*2
-        #print("x_k ", x_k)
+            k = k * 2
         x_ref = np.linspace(0, 1, resolution_per_ele)
-        ele_x = basis_func.points_from_ref_to_ele(x_k, h, x_ref)
-        #print("element_x ", ele_x)
-
+        ele_x = basis_func.points_from_ref_to_ele(node, h, x_ref)
         ele_x_values.extend(ele_x)
 
         s = np.zeros(resolution_per_ele)
-        for phi in functions:
-            s += p_coefs[k] * phi(x_ref)
+        for phi in basis_func_der:
+            s += p_h[k] * phi(x_ref)
         ele_y_values.extend(s)
 
-    #plt.plot(x_ele, p_coefs, label="aprox")
+    # plt.plot(x_ele, p_coefs, label="aprox")
     plt.plot(ele_x_values, ele_y_values, label="aprox")
     plt.plot(x, exact_solution(x), label="exact")
     plt.legend()
@@ -277,13 +164,6 @@ def FEM(N, quadratic=False):
 #     print("x: {}, x_h[i]: {}, x_h[i-1]: {}".format(x, x_h[i], x_h[i - 1]))
 
 
-# def exact_solution_b(x, Q=1, L=1):
-#     #@TODO: which value should be set in -L/3?
-#     if x <= -L/3:
-#         return -Q*(1000*x + 333*L)
-#     return -Q*x
-
-
 def plot_exact_solution():
     x = np.linspace(-1, 0, 1000)
     #print("exact solution ", exact_solution_a(x))
@@ -293,49 +173,43 @@ def plot_exact_solution():
     plt.show()
 
 
-def plot_fce(i, x, x_h, h):
-    res = []
-    for x_k in x:
-        res.append(linear_basis_functions(i, x_k, x_h, h))
-    #print("res ", res)
-    plt.plot(x, res)
+# def plot_fce(i, x, x_h, h):
+#     res = []
+#     for x_k in x:
+#         res.append(linear_basis_functions(i, x_k, x_h, h))
+#     #print("res ", res)
+#     plt.plot(x, res)
 
 
-def plot_basis_functions(N):
-    h = 1/(N-1)
-    x_h = np.linspace(-1, 0, N, endpoint=True)
-    #x_h = [0.2, 0.4, 0.6, 0.8]
-
-    # x_h = [-2].extend(x_h)
-    # x_h.append(2)
-
-    print("x_h ", x_h)
-    x = np.linspace(-1, 0, 1000)
-    #x = [-1, -0.8, -0.75]
-
-    plot_fce(0, x, x_h, h)
-    plot_fce(1, x, x_h, h)
-    plot_fce(2, x, x_h, h)
-    plot_fce(3, x, x_h, h)
-    #plot_fce(4, x, x_h, h)
-    plt.show()
-
-def local_matrix(N):
-    A = np.empty((N, N))
-    for k in range(N):
-        pass
-        #A[k:k+1, k:k+1] = M
+# def plot_basis_functions(N):
+#     h = 1/(N-1)
+#     x_h = np.linspace(-1, 0, N, endpoint=True)
+#     #x_h = [0.2, 0.4, 0.6, 0.8]
+#
+#     # x_h = [-2].extend(x_h)
+#     # x_h.append(2)
+#
+#     print("x_h ", x_h)
+#     x = np.linspace(-1, 0, 1000)
+#     #x = [-1, -0.8, -0.75]
+#
+#     plot_fce(0, x, x_h, h)
+#     plot_fce(1, x, x_h, h)
+#     plot_fce(2, x, x_h, h)
+#     plot_fce(3, x, x_h, h)
+#     #plot_fce(4, x, x_h, h)
+#     plt.show()
 
 
-def plot_quadratic_basis_fce():
-    x = np.linspace(0, 1, 200)
-
-    plt.plot(x, Quadratic.phi_ref_1(x), label="ref 1")
-    plt.plot(x, Quadratic.phi_ref_2(x), label="ref 2")
-    plt.plot(x, Quadratic.phi_ref_3(x), label="ref 3")
-    plt.legend()
-
-    plt.show()
+# def plot_quadratic_basis_fce():
+#     x = np.linspace(0, 1, 200)
+#
+#     plt.plot(x, Quadratic.phi_ref_1(x), label="ref 1")
+#     plt.plot(x, Quadratic.phi_ref_2(x), label="ref 2")
+#     plt.plot(x, Quadratic.phi_ref_3(x), label="ref 3")
+#     plt.legend()
+#
+#     plt.show()
 
 
 # def plot_reference_basis_fce():
@@ -355,14 +229,73 @@ def plot_quadratic_basis_fce():
 #     plt.show()
 
 
+def compute_err_L2(nodes, p_h, config):
+    """
+    Compute L2 norm
+    :param nodes: mesh nodes
+    :param p_h: approx solution vector of p
+    :param config: dict, contains exact solution function, type of basis functions, ...
+    :return: L2 norm
+    """
+    quad_degree = 3
+    p_exact = config["exact_solution"]
+
+    pt, w = np.polynomial.legendre.leggauss(quad_degree)
+    err = 0
+    for i in range(len(nodes)-1):
+        # Rescale quadrature from [-1, 1] to the particular element
+        quad_pt = (pt + 1) / 2 * (nodes[i+1] - nodes[i]) + nodes[i]
+        quad_w = w * (nodes[i+1] - nodes[i]) / 2
+
+        if config["quadratic"]:
+            poly = lagrange([nodes[i], (nodes[i] + nodes[i+1])/2, nodes[i+1]], [p_h[i*2], p_h[2*i+1], p_h[2*i+2]])
+        else:
+            poly = lagrange([nodes[i], nodes[i + 1]], [p_h[i], p_h[i + 1]])
+
+        et = np.dot((poly(quad_pt) - p_exact(quad_pt))**2, quad_w)
+        err += et
+
+    return np.sqrt(err)
+
+
+def test_convergence(config):
+    N_list = [10, 20, 40, 80, 160, 320, 640]
+    #N_list = [4]
+
+    L2_errors = []
+    steps_h = []
+    conv_rates = []
+    for i, N in enumerate(N_list):
+        nodes, h, p_h = FEM(N, **config)
+        L2_errors.append(compute_err_L2(nodes, p_h, config))
+        print("L2 err ", L2_errors[-1])
+        steps_h.append(h)
+        if i > 0:
+            conv_rate = np.log(L2_errors[i-1] / L2_errors[i]) / np.log(steps_h[i-1] / steps_h[i])
+            conv_rates.append(conv_rate)
+
+    print("steps_h ", steps_h)
+
+    # # convergance rate
+    # conv_rates = []
+    # for i in range(len(L2_errors)-1):
+
+    print("conv rates ", conv_rates)
+
+    plt.plot(N_list, L2_errors)
+    plt.yscale("log")
+    plt.show()
+
 
 if __name__ == '__main__':
-    N = 500# number of elements
+    N = 4# number of elements
     # plot_quadratic_basis_fce()
     # exit()
+    #config = {"conductivity": conductivity_a, "exact_solution": exact_solution_a, "L": 1, "Q": 1, "quadratic": False}
+    config = {"conductivity": conductivity_a, "exact_solution": exact_solution_a, "L": 1, "Q": 1, "quadratic": True}
+    #config = {"conductivity": conductivity_b, "exact_solution": exact_solution_b, "L": 1, "Q": 1, "quadratic": False}
+    #config = {"conductivity": conductivity_b, "exact_solution": exact_solution_b, "L": 1, "Q": 1, "quadratic": True}
 
-    FEM(N, quadratic=True)
+    #FEM(N, **config)
 
-    #plot_exact_solution()
-    #plot_basis_functions(N)
-    # plot_reference_basis_fce()
+    test_convergence(config)
