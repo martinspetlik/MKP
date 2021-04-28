@@ -30,12 +30,12 @@ class Linear(BasisFunctions):
         return x
 
     @staticmethod
-    def phi_ref_1_der(x=None, h=1):
-        return (-1/h)
+    def phi_ref_1_der(x=None):
+        return -1
 
     @staticmethod
-    def phi_ref_2_der(x=None, h=1):
-        return (1/h)
+    def phi_ref_2_der(x=None):
+        return 1
 
     @staticmethod
     def get_functions_der():
@@ -60,16 +60,16 @@ class Quadratic(BasisFunctions):
         return 2 * (x ** 2) - x
 
     @staticmethod
-    def phi_ref_1_der(x=None, h=1):
-        return (4*x-3)*(1/h)
+    def phi_ref_1_der(x):
+        return 4*x-3
 
     @staticmethod
-    def phi_ref_2_der(x=None, h=1):
-        return (-8 * x + 4) * (1/h)
+    def phi_ref_2_der(x):
+        return -8 * x + 4
 
     @staticmethod
-    def phi_ref_3_der(x=None, h=1):
-        return (4*x-1)*(1/h)
+    def phi_ref_3_der(x):
+        return 4*x-1
 
     @staticmethod
     def get_functions_der():
